@@ -1,14 +1,23 @@
 'use client';
 
-import React from 'react';
+import React, { Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { ImportView } from '@/components/ImportView';
 
-export default function ImportPlaceholderPage() {
+function ImportPageContent() {
+  const searchParams = useSearchParams();
+  const studentId = searchParams.get('studentId') || undefined;
+  return <ImportView preselectedStudentId={studentId} />;
+}
+
+export default function ImportPage() {
   return (
-    <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
-      <h1 className="text-xl font-semibold text-foreground">Import AAC Vocabulary File</h1>
-      <p className="mt-2 text-sm text-muted-foreground">
-        File format parsers (.ce, .sps/.spb, .p2gbk/.p2g) will be wired in Phases 5–8.
-      </p>
-    </div>
+    <Suspense
+      fallback={
+        <div className="h-48 animate-pulse rounded-2xl border border-border bg-card" />
+      }
+    >
+      <ImportPageContent />
+    </Suspense>
   );
 }

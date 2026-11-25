@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "build:static": "next build && node scripts/generate-service-worker.mjs",
+    "dev": "node scripts/copy-wasm.mjs && next dev",
+    "build": "node scripts/copy-wasm.mjs && next build",
+    "build:static": "node scripts/copy-wasm.mjs && next build && node scripts/generate-service-worker.mjs",
     "start": "next start",
     "lint": "next lint",
     "test": "vitest run",
