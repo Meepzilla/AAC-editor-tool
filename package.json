@@ -1,0 +1,39 @@
+{
+  "name": "aac-profile-manager",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/copy-wasm.mjs && next dev",
+    "build": "node scripts/copy-wasm.mjs && next build",
+    "build:static": "node scripts/copy-wasm.mjs && next build && node scripts/generate-service-worker.mjs",
+    "start": "next start",
+    "lint": "next lint",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "fflate": "^0.8.2",
+    "lucide-react": "^0.475.0",
+    "next": "^15.5.7",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "sql.js": "^1.13.0",
+    "tailwind-merge": "^2.6.0",
+    "tailwindcss-animate": "^1.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@types/sql.js": "^1.4.9",
+    "autoprefixer": "^10.4.21",
+    "eslint": "^9.27.0",
+    "eslint-config-next": "^15.5.7",
+    "fake-indexeddb": "^6.0.0",
+    "postcss": "^8.5.3",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}
