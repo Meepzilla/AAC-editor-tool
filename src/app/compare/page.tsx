@@ -1,14 +1,23 @@
 'use client';
 
-import React from 'react';
+import React, { Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { SnapshotCompareView } from '@/components/SnapshotCompareView';
 
-export default function ComparePlaceholderPage() {
+function ComparePageContent() {
+  const searchParams = useSearchParams();
+  const id = searchParams.get('id') || '';
+  return <SnapshotCompareView profileId={id} />;
+}
+
+export default function ComparePage() {
   return (
-    <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
-      <h1 className="text-xl font-semibold text-foreground">Compare Snapshots</h1>
-      <p className="mt-2 text-sm text-muted-foreground">
-        Snapshot comparison view will be added in Phase 7.
-      </p>
-    </div>
+    <Suspense
+      fallback={
+        <div className="h-48 animate-pulse rounded-2xl border border-border bg-card" />
+      }
+    >
+      <ComparePageContent />
+    </Suspense>
   );
 }
