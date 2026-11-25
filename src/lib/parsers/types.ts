@@ -1,19 +1,34 @@
 import { SafeClinicalError } from '../privacy';
-import type { AacSystem, VocabButton, VocabPage, VocabSnapshot } from '../types';
+import type {
+  AacSystem,
+  SymbolLibraryRef,
+  VocabButton,
+  VocabPage,
+  VocabSnapshot,
+  VocabSymbolAsset,
+} from '../types';
 import { formatGridSize, generateId } from '../utils';
 
 /**
  * Common Open Board Format (OBF)-shaped board model produced by every AAC format parser.
- * Symbols/artwork are never extracted — only labels, spoken messages, grid layout, and page links.
+ * Stores labels, spoken messages, grid placement (row/column/spans), colors, page links,
+ * embedded symbol/photo assets from the export file, and built-in library symbol IDs.
  */
 export interface ObfButton {
   id: string;
   row: number;
   column: number;
+  rowSpan?: number;
+  colSpan?: number;
   label: string;
   vocalization?: string;
   loadBoardId?: string;
   loadBoardName?: string;
+  symbolImageId?: string;
+  symbolLibraryRef?: SymbolLibraryRef;
+  backgroundColor?: string;
+  borderColor?: string;
+  textColor?: string;
 }
 
 export interface ObfBoard {
@@ -32,6 +47,8 @@ export interface ObfBoardSet {
   /** Main grid size formatted as "rows x columns" (e.g., "6 x 10"). */
   mainGridSize: string;
   boards: ObfBoard[];
+  /** Deduplicated symbol images extracted from the export archive/database. */
+  symbols?: Record<string, VocabSymbolAsset>;
   notes: string[];
 }
 
@@ -82,8 +99,29 @@ export class ParserRefusalError extends SafeClinicalError {
   }
 }
 
-export const SYMBOLS_OMITTED_NOTE =
-  'Symbol artwork is omitted (licensed symbols are never extracted); labels, spoken messages, grid layout, and page links are preserved.';
+export function buildSymbolsSummaryNote(
+  embeddedCount: number,
+  libraryRefCount: number
+): string {
+  if (embeddedCount > 0 && libraryRefCount > 0) {
+    return `Extracted ${embeddedCount} embedded symbol/image file${
+      embeddedCount === 1 ? '' : 's'
+    } from this export. ${libraryRefCount} button${
+      libraryRefCount === 1 ? '' : 's'
+    } reference built-in app symbol libraries (whose image artwork lives inside the AAC app on the iPad rather than inside the exported file) and are marked on the grid.`;
+  }
+  if (embeddedCount > 0) {
+    return `Extracted ${embeddedCount} embedded symbol/image file${
+      embeddedCount === 1 ? '' : 's'
+    } onto their exact grid positions.`;
+  }
+  if (libraryRefCount > 0) {
+    return `${libraryRefCount} button${
+      libraryRefCount === 1 ? '' : 's'
+    } reference built-in app symbol libraries (their artwork lives inside the AAC app rather than inside the export file); their positions, labels, colors, and open grid slots are mapped below.`;
+  }
+  return 'Labels, spoken messages, grid layout, open slots, and page links were extracted from this export.';
+}
 
 /**
  * Orders boards starting with the root/home page, then breadth-first along page links,
@@ -119,23 +157,36 @@ export function orderBoardsFromRoot(boards: ObfBoard[], rootBoardId: string | nu
 }
 
 /**
- * Converts a parsed ObfBoardSet into a storable VocabSnapshot.
+ * Converts a parsed ObfBoardSet into a storable VocabSnapshot, preserving deduplicated
+ * extracted symbol images, library references, grid spans, and colors.
  */
 export function boardSetToSnapshot(
   boardSet: ObfBoardSet,
   sourceFileName: string,
   notes: string = ''
 ): VocabSnapshot {
+  const usedSymbolIds = new Set<string>();
+
   const pages: VocabPage[] = boardSet.boards.map((board) => {
-    const buttons: VocabButton[] = board.buttons.map((btn) => ({
-      id: btn.id,
-      row: btn.row,
-      column: btn.column,
-      label: btn.label,
-      message: btn.vocalization ?? btn.label,
-      ...(btn.loadBoardName ? { linkTargetPageName: btn.loadBoardName } : {}),
-      ...(btn.loadBoardId ? { linkTargetPageId: btn.loadBoardId } : {}),
-    }));
+    const buttons: VocabButton[] = board.buttons.map((btn) => {
+      if (btn.symbolImageId) usedSymbolIds.add(btn.symbolImageId);
+      return {
+        id: btn.id,
+        row: btn.row,
+        column: btn.column,
+        ...(btn.rowSpan && btn.rowSpan > 1 ? { rowSpan: btn.rowSpan } : {}),
+        ...(btn.colSpan && btn.colSpan > 1 ? { colSpan: btn.colSpan } : {}),
+        label: btn.label,
+        message: btn.vocalization ?? btn.label,
+        ...(btn.loadBoardName ? { linkTargetPageName: btn.loadBoardName } : {}),
+        ...(btn.loadBoardId ? { linkTargetPageId: btn.loadBoardId } : {}),
+        ...(btn.symbolImageId ? { symbolImageId: btn.symbolImageId } : {}),
+        ...(btn.symbolLibraryRef ? { symbolLibraryRef: btn.symbolLibraryRef } : {}),
+        ...(btn.backgroundColor ? { backgroundColor: btn.backgroundColor } : {}),
+        ...(btn.borderColor ? { borderColor: btn.borderColor } : {}),
+        ...(btn.textColor ? { textColor: btn.textColor } : {}),
+      };
+    });
     return {
       id: board.id,
       name: board.name,
@@ -144,6 +195,19 @@ export function boardSetToSnapshot(
       buttons,
     };
   });
+
+  // Only retain symbol assets referenced by at least one button on an exported page.
+  let symbols: Record<string, VocabSymbolAsset> | undefined;
+  if (boardSet.symbols) {
+    const kept: Record<string, VocabSymbolAsset> = {};
+    for (const id of usedSymbolIds) {
+      const asset = boardSet.symbols[id];
+      if (asset) kept[id] = asset;
+    }
+    if (Object.keys(kept).length > 0) {
+      symbols = kept;
+    }
+  }
 
   // Deduplicate words case-insensitively while preserving the first observed capitalization.
   const uniqueWords = new Map<string, string>();
@@ -178,6 +242,7 @@ export function boardSetToSnapshot(
     buttonCount,
     wordList,
     pages,
+    ...(symbols ? { symbols } : {}),
     notes: notes.trim(),
   };
 }

@@ -24,6 +24,7 @@ import {
   getProfileDisplayLabel,
   reviewDateStatus,
 } from '@/lib/utils';
+import { PageGridViewer } from './PageGridViewer';
 import { QuickNoteModal } from './QuickNoteModal';
 import { StudentAvatar } from './StudentAvatar';
 import { SystemBadge } from './SystemBadge';
@@ -65,15 +66,22 @@ function FieldRow({ label, value }: { label: string; value?: string | null }) {
   );
 }
 
-function SnapshotPreview({ snapshot }: { snapshot: VocabSnapshot }) {
-  const [expanded, setExpanded] = useState(false);
+function SnapshotPreview({
+  snapshot,
+  isLatest,
+}: {
+  snapshot: VocabSnapshot;
+  isLatest: boolean;
+}) {
+  const [gridOpen, setGridOpen] = useState(true);
+  const symbolCount = snapshot.symbols ? Object.keys(snapshot.symbols).length : 0;
 
   return (
-    <div className="rounded-xl border border-teal-200/80 bg-teal-50/50 p-4 space-y-3">
+    <div className="rounded-xl border border-teal-200/80 bg-teal-50/40 p-4 space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
           <div className="text-xs font-medium uppercase tracking-wide text-teal-800">
-            Latest Vocabulary Snapshot
+            {isLatest ? 'Latest Vocabulary Snapshot' : 'Selected Vocabulary Snapshot'}
           </div>
           <div className="mt-0.5 text-base font-semibold text-foreground">
             {snapshot.vocabularyName || snapshot.sourceFileName}
@@ -85,7 +93,7 @@ function SnapshotPreview({ snapshot }: { snapshot: VocabSnapshot }) {
         <SystemBadge system={snapshot.sourceSystem} />
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
         <div className="rounded-xl border border-border bg-card px-3 py-2.5">
           <div className="text-[11px] text-muted-foreground">Pages</div>
           <div className="text-lg font-semibold text-foreground">{snapshot.pageCount}</div>
@@ -104,6 +112,10 @@ function SnapshotPreview({ snapshot }: { snapshot: VocabSnapshot }) {
             {snapshot.gridSize || '—'}
           </div>
         </div>
+        <div className="col-span-2 sm:col-span-1 rounded-xl border border-border bg-card px-3 py-2.5">
+          <div className="text-[11px] text-muted-foreground">Extracted Symbols</div>
+          <div className="text-lg font-semibold text-foreground">{symbolCount}</div>
+        </div>
       </div>
 
       {snapshot.notes && (
@@ -114,63 +126,22 @@ function SnapshotPreview({ snapshot }: { snapshot: VocabSnapshot }) {
       )}
 
       {snapshot.pages.length > 0 && (
-        <div>
+        <div className="space-y-3">
           <button
             type="button"
-            onClick={() => setExpanded((prev) => !prev)}
-            className="inline-flex min-h-[36px] items-center gap-1.5 text-xs font-medium text-primary hover:underline"
+            onClick={() => setGridOpen((prev) => !prev)}
+            className="inline-flex min-h-[36px] items-center gap-1.5 text-xs font-semibold text-primary hover:underline"
           >
-            {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            {gridOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
             <span>
-              {expanded
-                ? 'Hide pages & button labels'
-                : `Browse first ${Math.min(snapshot.pages.length, 10)} of ${snapshot.pages.length} pages`}
+              {gridOpen
+                ? 'Hide interactive grid & symbol map'
+                : `Show interactive grid & symbol map (${snapshot.pages.length} pages)`}
             </span>
           </button>
 
-          {expanded && (
-            <div className="mt-3 space-y-2.5">
-              {snapshot.pages.slice(0, 10).map((page) => (
-                <div
-                  key={page.id}
-                  className="rounded-xl border border-border bg-card p-3 space-y-2"
-                >
-                  <div className="flex items-center justify-between gap-2 text-xs">
-                    <span className="font-semibold text-foreground">{page.name}</span>
-                    <span className="text-muted-foreground">
-                      {page.rows} × {page.columns} · {page.buttons.length} buttons
-                    </span>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {page.buttons.slice(0, 24).map((btn) => (
-                      <span
-                        key={btn.id}
-                        className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-0.5 text-xs text-foreground"
-                        title={
-                          btn.linkTargetPageName
-                            ? `Links to ${btn.linkTargetPageName}`
-                            : btn.message && btn.message !== btn.label
-                            ? `Speaks: ${btn.message}`
-                            : undefined
-                        }
-                      >
-                        <span>{btn.label || '(unlabeled)'}</span>
-                        {btn.linkTargetPageName && (
-                          <span className="text-[10px] font-medium text-primary">
-                            → {btn.linkTargetPageName}
-                          </span>
-                        )}
-                      </span>
-                    ))}
-                    {page.buttons.length > 24 && (
-                      <span className="text-xs text-muted-foreground self-center">
-                        +{page.buttons.length - 24} more
-                      </span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
+          {gridOpen && (
+            <PageGridViewer pages={snapshot.pages} symbols={snapshot.symbols} />
           )}
         </div>
       )}
@@ -184,6 +155,7 @@ export function ProfileView({ profileId }: { profileId: string }) {
   const [quickNoteOpen, setQuickNoteOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [selectedSnapshotId, setSelectedSnapshotId] = useState<string>('');
 
   const profile: StudentProfile | undefined = useMemo(
     () => profiles.find((p) => p.id === profileId),
@@ -219,7 +191,9 @@ export function ProfileView({ profileId }: { profileId: string }) {
 
   const label = getProfileDisplayLabel(profile);
   const reviewState = reviewDateStatus(profile.reviewDate);
-  const latestSnapshot = profile.snapshots[0];
+  const activeSnapshot =
+    profile.snapshots.find((s) => s.id === selectedSnapshotId) ?? profile.snapshots[0];
+  const isViewingLatest = Boolean(activeSnapshot && activeSnapshot.id === profile.snapshots[0]?.id);
 
   const handleDelete = async () => {
     setDeleting(true);
@@ -470,61 +444,78 @@ export function ProfileView({ profileId }: { profileId: string }) {
           </div>
         }
       >
-        {!latestSnapshot ? (
+        {!activeSnapshot ? (
           <div className="rounded-xl border border-dashed border-border bg-background p-6 text-center space-y-2">
             <Layers className="mx-auto h-6 w-6 text-muted-foreground" />
             <p className="text-sm font-medium text-foreground">
               No vocabulary files imported yet
             </p>
             <p className="text-xs text-muted-foreground max-w-md mx-auto">
-              Import a TouchChat/LAMP (.ce) or TD Snap (.sps/.spb) export to capture this student&rsquo;s
-              pages, grid sizes, links, and word count without hand typing.
+              Import a TouchChat/LAMP (.ce) or TD Snap (.sps/.spb) export to map this student&rsquo;s
+              pages, symbols, grid positions, open cells, and word count without hand typing.
             </p>
           </div>
         ) : (
           <div className="space-y-4">
-            <SnapshotPreview snapshot={latestSnapshot} />
+            <SnapshotPreview
+              key={activeSnapshot.id}
+              snapshot={activeSnapshot}
+              isLatest={isViewingLatest}
+            />
 
             {profile.snapshots.length > 0 && (
               <div className="space-y-2">
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  Snapshot History
+                  Snapshot History (Tap a snapshot to inspect its grid)
                 </h3>
-                <div className="divide-y divide-border rounded-xl border border-border bg-background">
-                  {profile.snapshots.map((snap, idx) => (
-                    <div
-                      key={snap.id}
-                      className="flex flex-col gap-1.5 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
-                    >
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-sm font-medium text-foreground">
-                            {snap.vocabularyName || snap.sourceFileName}
-                          </span>
-                          {idx === 0 && (
-                            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase text-primary">
-                              Latest
+                <div className="divide-y divide-border rounded-xl border border-border bg-background overflow-hidden">
+                  {profile.snapshots.map((snap, idx) => {
+                    const isSelected = snap.id === activeSnapshot.id;
+                    return (
+                      <button
+                        key={snap.id}
+                        type="button"
+                        onClick={() => setSelectedSnapshotId(snap.id)}
+                        className={cn(
+                          'w-full text-left flex flex-col gap-1.5 px-4 py-3 sm:flex-row sm:items-center sm:justify-between transition-colors hover:bg-accent/40',
+                          isSelected && 'bg-accent/50'
+                        )}
+                      >
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-medium text-foreground">
+                              {snap.vocabularyName || snap.sourceFileName}
                             </span>
+                            {idx === 0 && (
+                              <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase text-primary">
+                                Latest
+                              </span>
+                            )}
+                            {isSelected && (
+                              <span className="rounded-full border border-primary/30 bg-card px-2 py-0.5 text-[10px] font-medium text-primary">
+                                Viewing Grid
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {formatDateTime(snap.importedAt)} · {snap.sourceSystem}
+                            {snap.notes ? ` · ${snap.notes}` : ''}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3 text-xs font-medium text-foreground/80">
+                          <span>{snap.pageCount} pages</span>
+                          <span>·</span>
+                          <span>{snap.wordList.length} words</span>
+                          {snap.gridSize && (
+                            <>
+                              <span>·</span>
+                              <span>{snap.gridSize}</span>
+                            </>
                           )}
                         </div>
-                        <div className="text-xs text-muted-foreground">
-                          {formatDateTime(snap.importedAt)} · {snap.sourceSystem}
-                          {snap.notes ? ` · ${snap.notes}` : ''}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-3 text-xs font-medium text-foreground/80">
-                        <span>{snap.pageCount} pages</span>
-                        <span>·</span>
-                        <span>{snap.wordList.length} words</span>
-                        {snap.gridSize && (
-                          <>
-                            <span>·</span>
-                            <span>{snap.gridSize}</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             )}

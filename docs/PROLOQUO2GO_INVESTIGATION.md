@@ -48,7 +48,7 @@ Fill in each row from a verified disposable sample:
 | Where are button labels, spoken messages, and cell positions stored? | _TBD_ |
 | How are folder/page navigation links represented? | _TBD_ |
 | How are hidden/inactive buttons flagged? | _TBD_ |
-| How are licensed SymbolStix/custom image references separated so they can be ignored? | _TBD_ |
+| How are embedded custom symbols/photos stored vs built-in SymbolStix library references? | _TBD_ |
 
 ---
 
@@ -57,5 +57,5 @@ Fill in each row from a verified disposable sample:
 Once a disposable `.p2gbk` / `.p2g` structure report confirms the container is unencrypted and reveals its table or plist layout:
 
 1. Document the confirmed schema in this file.
-2. Propose a read-only parser in `src/lib/parsers/proloquo2go.ts` mapping pages, grid sizes, labels, messages, and links into the common Open Board Format (`ObfBoardSet`) model while ignoring all symbol artwork.
-3. Add a synthetic fixture test in `src/lib/__tests__/proloquo2go-parser.test.ts` proving page count, grid size, labels, messages, and page links without using real student data.
+2. Propose a read-only parser in `src/lib/parsers/proloquo2go.ts` mapping pages, grid sizes, cell coordinates/spans, colors, labels, messages, embedded symbols, built-in library symbol IDs, and links into the common Open Board Format (`ObfBoardSet`) model.
+3. Add a synthetic fixture test in `src/lib/__tests__/proloquo2go-parser.test.ts` proving page count, grid size, symbols, labels, messages, and page links without using real student data.

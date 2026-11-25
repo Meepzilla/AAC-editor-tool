@@ -5,7 +5,6 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   AlertCircle,
-  ArrowRight,
   CheckCircle2,
   Copy,
   FileUp,
@@ -28,6 +27,7 @@ import {
 } from '@/lib/parsers';
 import { toSafeErrorMessage } from '@/lib/privacy';
 import { cn, formatBytes, getProfileDisplayLabel } from '@/lib/utils';
+import { PageGridViewer } from './PageGridViewer';
 import { SystemBadge } from './SystemBadge';
 
 interface ImportViewProps {
@@ -211,7 +211,7 @@ export function ImportView({ preselectedStudentId }: ImportViewProps) {
           <div className="font-semibold">100% On-Device Read-Only Parsing</div>
           <p className="text-teal-900/80">
             Files are parsed inside your browser using local WebAssembly SQLite and never leave this iPad.
-            Your original AAC export file is never modified, and licensed symbol artwork is never extracted.
+            Your original AAC export file is never modified; embedded symbols/photos in the export are placed at their exact grid coordinates locally.
           </p>
         </div>
       </div>
@@ -411,7 +411,7 @@ export function ImportView({ preselectedStudentId }: ImportViewProps) {
             </div>
 
             {/* Summary counts */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
               <div className="rounded-xl border border-border bg-background p-3.5">
                 <div className="text-xs text-muted-foreground">Pages</div>
                 <div className="mt-1 text-2xl font-semibold text-foreground">
@@ -436,6 +436,12 @@ export function ImportView({ preselectedStudentId }: ImportViewProps) {
                   {review.boardSet.mainGridSize || '—'}
                 </div>
               </div>
+              <div className="col-span-2 sm:col-span-1 rounded-xl border border-border bg-background p-3.5">
+                <div className="text-xs text-muted-foreground">Extracted Symbols</div>
+                <div className="mt-1 text-2xl font-semibold text-foreground">
+                  {review.boardSet.symbols ? Object.keys(review.boardSet.symbols).length : 0}
+                </div>
+              </div>
             </div>
 
             {review.boardSet.notes.length > 0 && (
@@ -446,54 +452,36 @@ export function ImportView({ preselectedStudentId }: ImportViewProps) {
               </div>
             )}
 
-            {/* First pages preview */}
+            {/* Interactive Grid & Symbol Placement Preview */}
             <div className="space-y-2.5">
               <h3 className="text-sm font-semibold text-foreground">
-                First Pages Preview ({Math.min(review.boardSet.boards.length, 6)} of{' '}
-                {review.boardSet.boards.length})
+                Interactive Grid &amp; Symbol Placement Preview
               </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {review.boardSet.boards.slice(0, 6).map((board) => (
-                  <div
-                    key={board.id}
-                    className="rounded-xl border border-border bg-background p-3.5 space-y-2"
-                  >
-                    <div className="flex items-center justify-between gap-2 text-xs">
-                      <span className="font-semibold text-foreground truncate">
-                        {board.name}
-                      </span>
-                      <span className="shrink-0 text-muted-foreground">
-                        {board.rows} × {board.columns} · {board.buttons.length} buttons
-                      </span>
-                    </div>
-                    {board.buttons.length === 0 ? (
-                      <p className="text-xs italic text-muted-foreground">No labeled buttons</p>
-                    ) : (
-                      <div className="flex flex-wrap gap-1.5">
-                        {board.buttons.slice(0, 18).map((btn) => (
-                          <span
-                            key={btn.id}
-                            className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-0.5 text-xs text-foreground"
-                          >
-                            <span>{btn.label}</span>
-                            {btn.loadBoardName && (
-                              <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-primary">
-                                <ArrowRight className="h-2.5 w-2.5" />
-                                {btn.loadBoardName}
-                              </span>
-                            )}
-                          </span>
-                        ))}
-                        {board.buttons.length > 18 && (
-                          <span className="text-xs text-muted-foreground self-center">
-                            +{board.buttons.length - 18} more
-                          </span>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
+              <PageGridViewer
+                pages={review.boardSet.boards.map((board) => ({
+                  id: board.id,
+                  name: board.name,
+                  rows: board.rows,
+                  columns: board.columns,
+                  buttons: board.buttons.map((btn) => ({
+                    id: btn.id,
+                    row: btn.row,
+                    column: btn.column,
+                    rowSpan: btn.rowSpan,
+                    colSpan: btn.colSpan,
+                    label: btn.label,
+                    message: btn.vocalization ?? btn.label,
+                    linkTargetPageId: btn.loadBoardId,
+                    linkTargetPageName: btn.loadBoardName,
+                    symbolImageId: btn.symbolImageId,
+                    symbolLibraryRef: btn.symbolLibraryRef,
+                    backgroundColor: btn.backgroundColor,
+                    borderColor: btn.borderColor,
+                    textColor: btn.textColor,
+                  })),
+                }))}
+                symbols={review.boardSet.symbols}
+              />
             </div>
           </section>
 
