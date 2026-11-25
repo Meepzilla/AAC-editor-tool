@@ -1,4 +1,5 @@
 import { inspectContainerStructure } from './container-inspect';
+import { parseTdSnapFile } from './tdsnap';
 import { parseTouchChatCe } from './touchchat';
 import {
   ParserRefusalError,
@@ -43,16 +44,11 @@ export async function parseAacFile(
     return parseTouchChatCe(fileName, bytes);
   }
 
-  const inspection = await inspectContainerStructure(fileName, bytes);
-
   if (format === 'td-snap') {
-    throw new ParserRefusalError(
-      'TD_SNAP_PENDING',
-      'TD Snap (.sps / .spb) parser will be enabled in Phase 6.',
-      'td-snap',
-      inspection
-    );
+    return parseTdSnapFile(fileName, bytes);
   }
+
+  const inspection = await inspectContainerStructure(fileName, bytes);
 
   if (format === 'proloquo2go') {
     throw new ParserRefusalError(
