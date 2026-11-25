@@ -1,4 +1,8 @@
 import { inspectContainerStructure } from './container-inspect';
+import {
+  formatStructureReportText,
+  parseProloquo2GoStub,
+} from './proloquo2go';
 import { parseTdSnapFile } from './tdsnap';
 import { parseTouchChatCe } from './touchchat';
 import {
@@ -9,6 +13,7 @@ import {
 
 export * from './types';
 export { inspectContainerStructure } from './container-inspect';
+export { formatStructureReportText } from './proloquo2go';
 
 /**
  * Detects an AAC export format from its filename extension.
@@ -48,16 +53,11 @@ export async function parseAacFile(
     return parseTdSnapFile(fileName, bytes);
   }
 
-  const inspection = await inspectContainerStructure(fileName, bytes);
-
   if (format === 'proloquo2go') {
-    throw new ParserRefusalError(
-      'FORMAT_NOT_MAPPED',
-      'Proloquo2Go (.p2gbk / .p2g) format is not mapped yet. No snapshot was saved.',
-      'proloquo2go',
-      inspection
-    );
+    return parseProloquo2GoStub(fileName, bytes);
   }
+
+  const inspection = await inspectContainerStructure(fileName, bytes);
 
   if (inspection.looksEncrypted) {
     throw new ParserRefusalError(

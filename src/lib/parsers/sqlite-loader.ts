@@ -23,11 +23,7 @@ export async function getSqlJs(): Promise<SqlJsStatic> {
         typeof window === 'undefined';
 
       if (isNode) {
-        const path = await import('node:path');
-        const wasmPath = path.resolve(
-          process.cwd(),
-          'node_modules/sql.js/dist/sql-wasm.wasm'
-        );
+        const wasmPath = `${process.cwd()}/node_modules/sql.js/dist/sql-wasm.wasm`;
         return initSqlJs({ locateFile: () => wasmPath });
       }
 

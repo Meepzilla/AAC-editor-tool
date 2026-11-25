@@ -7,6 +7,7 @@ import {
   AlertCircle,
   ArrowRight,
   CheckCircle2,
+  Copy,
   FileUp,
   FolderOpen,
   Info,
@@ -19,6 +20,7 @@ import { useProfiles } from '@/hooks/use-profiles';
 import { createEmptyProfile } from '@/lib/constants';
 import {
   boardSetToSnapshot,
+  formatStructureReportText,
   parseAacFile,
   ParserRefusalError,
   type ObfBoardSet,
@@ -66,6 +68,7 @@ export function ImportView({ preselectedStudentId }: ImportViewProps) {
   const [snapshotNotes, setSnapshotNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [copiedReport, setCopiedReport] = useState(false);
 
   useEffect(() => {
     if (preselectedStudentId && profiles.some((p) => p.id === preselectedStudentId)) {
@@ -288,9 +291,26 @@ export function ImportView({ preselectedStudentId }: ImportViewProps) {
 
           {refusal.inspection && (
             <div className="rounded-xl border border-amber-200 bg-card p-4 space-y-3 text-xs">
-              <div className="flex items-center gap-1.5 font-semibold text-foreground">
-                <Info className="h-4 w-4 text-primary" />
-                <span>Structure-Only Findings (No Vocabulary Words Included)</span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 font-semibold text-foreground">
+                  <Info className="h-4 w-4 text-primary" />
+                  <span>Structure-Only Findings (No Vocabulary Words Included)</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!refusal.inspection) return;
+                    const text = formatStructureReportText(refusal.inspection);
+                    void navigator.clipboard?.writeText(text).then(() => {
+                      setCopiedReport(true);
+                      window.setTimeout(() => setCopiedReport(false), 2500);
+                    });
+                  }}
+                  className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1 text-xs font-medium text-foreground hover:bg-secondary"
+                >
+                  <Copy className="h-3.5 w-3.5 text-primary" />
+                  <span>{copiedReport ? 'Copied!' : 'Copy Safe Structure Report'}</span>
+                </button>
               </div>
               <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
