@@ -1,6 +1,12 @@
 import type { Database } from 'sql.js';
+import type { VocabSymbolAsset } from '../types';
 import { formatGridSize } from '../utils';
 import { isZipBytes, safeUnzip } from './container-inspect';
+import {
+  argbToHex,
+  decodeEmbeddedSymbolAsset,
+  MAX_TOTAL_SYMBOL_BYTES,
+} from './media';
 import {
   findColumnCaseInsensitive,
   isSqliteBytes,
@@ -11,9 +17,9 @@ import {
   quoteIdentifier,
 } from './sqlite-loader';
 import {
+  buildSymbolsSummaryNote,
   orderBoardsFromRoot,
   ParserRefusalError,
-  SYMBOLS_OMITTED_NOTE,
   type ObfBoard,
   type ObfBoardSet,
   type ObfButton,
@@ -25,10 +31,12 @@ import {
  * Ported from the open-source AAC Editor project (github.com/rjpenny16/AAC-Editor, MIT):
  * - Discovers tables and columns dynamically at runtime (never hard-coding a single schema version).
  * - Runs SQLite hardening (`trusted_schema=OFF`, `cell_size_check=ON`) and `PRAGMA integrity_check`.
- * - Ignores TD Snap's proprietary `SyncHash` and symbol/media columns (read-only, never writes back).
+ * - Extracts embedded symbol/photo blobs from `PageSetData` (`Button.PageSetImageId`),
+ *   built-in library symbol IDs (`Button.LibrarySymbolId`), cell spans (`ElementPlacement.GridSpan`),
+ *   and button/reference colors (`BackgroundColor`, `ForegroundColor`, `BorderColor`).
+ * - Ignores TD Snap's proprietary `SyncHash` (read-only, never writes files back).
  */
 
-// TD Snap PageType 1 = user-visible vocabulary page; 3/4 = message bar / system pages.
 const PAGE_TYPE_VOCAB = 1;
 
 function cleanText(value: unknown): string {
@@ -68,14 +76,24 @@ export function parseTdSnapGridPosition(value: string): { col: number; row: numb
   return { col, row };
 }
 
+/**
+ * Parses TD Snap's "colSpan,rowSpan" value in ElementPlacement.GridSpan.
+ */
+export function parseTdSnapGridSpan(value: string): { colSpan: number; rowSpan: number } {
+  const parts = (value || '').split(',');
+  if (parts.length !== 2) return { colSpan: 1, rowSpan: 1 };
+  const colSpan = Number.parseInt(parts[0].trim(), 10);
+  const rowSpan = Number.parseInt(parts[1].trim(), 10);
+  return {
+    colSpan: Number.isInteger(colSpan) && colSpan > 0 ? colSpan : 1,
+    rowSpan: Number.isInteger(rowSpan) && rowSpan > 0 ? rowSpan : 1,
+  };
+}
+
 interface ParsedCommandSummary {
   linkedPageId: string | null;
 }
 
-/**
- * Parses TD Snap's CommandSequence.SerializedCommands JSON looking for navigation commands
- * (`$type` == "2" / 2 with `LinkedPageId`).
- */
 function parseCommandSequence(serialized: unknown): ParsedCommandSummary {
   if (typeof serialized !== 'string' || !serialized.trim()) {
     return { linkedPageId: null };
@@ -92,7 +110,7 @@ function parseCommandSequence(serialized: unknown): ParsedCommandSummary {
       }
     }
   } catch {
-    // Unparseable JSON command sequences are ignored cleanly.
+    // Ignore unreadable command JSON
   }
   return { linkedPageId: null };
 }
@@ -161,7 +179,43 @@ function readPageSetProperties(
 }
 
 /**
- * Parses a TD Snap `.sps` or `.spb` export into the common OBF board model.
+ * Discovers embedded image blobs stored in TD Snap's `PageSetData` table (`Id` -> blob).
+ */
+function readPageSetDataIndex(
+  db: Database,
+  tables: string[]
+): Map<number, { identifier: string; data: Uint8Array }> {
+  const map = new Map<number, { identifier: string; data: Uint8Array }>();
+  const dataTable = findTable(tables, 'pagesetdata');
+  if (!dataTable) return map;
+
+  const cols = listColumns(db, dataTable);
+  const idCol = findColumnCaseInsensitive(cols, ['Id']);
+  const identCol = findColumnCaseInsensitive(cols, ['Identifier']);
+  const blobCol = findColumnCaseInsensitive(cols, ['Data']);
+  if (!idCol || !blobCol) return map;
+
+  const selectCols = [
+    `${quoteIdentifier(idCol)} AS id`,
+    identCol ? `${quoteIdentifier(identCol)} AS ident` : `'' AS ident`,
+    `${quoteIdentifier(blobCol)} AS data`,
+  ].join(', ');
+
+  for (const row of queryRows(db, `SELECT ${selectCols} FROM ${quoteIdentifier(dataTable)}`)) {
+    const id = Number(row.id);
+    if (!Number.isFinite(id) || !(row.data instanceof Uint8Array) || row.data.length === 0) {
+      continue;
+    }
+    const identifier = cleanText(row.ident) || `psd-${id}`;
+    map.set(id, { identifier, data: row.data });
+  }
+  return map;
+}
+
+/**
+ * Parses a TD Snap `.sps` or `.spb` export into the common OBF board model,
+ * extracting grid coordinates, spans, button colors, embedded `PageSetData` symbols,
+ * built-in library symbol IDs, labels, messages, and page links.
  */
 export async function parseTdSnapFile(
   fileName: string,
@@ -231,6 +285,7 @@ export async function parseTdSnapFile(
     const placeCols = listColumns(db, placementTable!);
     const placeIdCol = findColumnCaseInsensitive(placeCols, ['Id']);
     const placePosCol = findColumnCaseInsensitive(placeCols, ['GridPosition']);
+    const placeSpanCol = findColumnCaseInsensitive(placeCols, ['GridSpan']);
     const placeVisCol = findColumnCaseInsensitive(placeCols, ['Visible']);
     const placeRefIdCol = findColumnCaseInsensitive(placeCols, ['ElementReferenceId']);
     const placeLayoutIdCol = findColumnCaseInsensitive(placeCols, ['PageLayoutId']);
@@ -242,12 +297,22 @@ export async function parseTdSnapFile(
       );
     }
 
+    // Runtime column discovery for ElementReference (optional BackgroundColor / ForegroundColor)
+    const refCols = listColumns(db, refTable!);
+    const refIdCol = findColumnCaseInsensitive(refCols, ['Id']);
+    const refBgCol = findColumnCaseInsensitive(refCols, ['BackgroundColor']);
+    const refFgCol = findColumnCaseInsensitive(refCols, ['ForegroundColor']);
+
     // Runtime column discovery for Button
     const btnCols = listColumns(db, buttonTable!);
     const btnIdCol = findColumnCaseInsensitive(btnCols, ['Id']);
     const btnLabelCol = findColumnCaseInsensitive(btnCols, ['Label']);
     const btnMsgCol = findColumnCaseInsensitive(btnCols, ['Message']);
     const btnRefIdCol = findColumnCaseInsensitive(btnCols, ['ElementReferenceId']);
+    const btnImgIdCol = findColumnCaseInsensitive(btnCols, ['PageSetImageId']);
+    const btnLibSymCol = findColumnCaseInsensitive(btnCols, ['LibrarySymbolId']);
+    const btnBorderCol = findColumnCaseInsensitive(btnCols, ['BorderColor']);
+    const btnBorderThickCol = findColumnCaseInsensitive(btnCols, ['BorderThickness']);
     if (!btnIdCol || !btnLabelCol || !btnRefIdCol) {
       throw new ParserRefusalError(
         'TDSNAP_MISSING_BUTTON_COLUMNS',
@@ -257,6 +322,7 @@ export async function parseTdSnapFile(
     }
 
     const props = readPageSetProperties(db, tables);
+    const pageSetDataIndex = readPageSetDataIndex(db, tables);
 
     // Load pages (prefer PageType = 1 vocabulary pages when PageType column exists).
     const pageSelect = `
@@ -317,7 +383,6 @@ export async function parseTdSnapFile(
       placementCountByLayout.set(Number(row.layout_id), Number(row.c ?? 0));
     }
 
-    // Determine fallback grid dimension from most common PageLayoutSetting among vocab pages if PageSetProperties lacked one.
     let defaultGrid = props.defaultGrid;
     if (!defaultGrid) {
       const freq = new Map<string, number>();
@@ -384,22 +449,54 @@ export async function parseTdSnapFile(
       }
     }
 
-    // Assemble boards for each vocabulary page.
-    const boards: ObfBoard[] = [];
+    const extractedSymbols: Record<string, VocabSymbolAsset> = {};
+    let totalSymbolBytes = 0;
+    let libraryRefButtonCount = 0;
+
+    const resolvePageSetImage = (imageId: number): string | undefined => {
+      if (!Number.isFinite(imageId) || imageId <= 0) return undefined;
+      const entry = pageSetDataIndex.get(imageId);
+      if (!entry) return undefined;
+      const assetKey = `tdsnap:${entry.identifier}`;
+      if (extractedSymbols[assetKey]) return assetKey;
+      if (totalSymbolBytes >= MAX_TOTAL_SYMBOL_BYTES) return undefined;
+      const decoded = decodeEmbeddedSymbolAsset(assetKey, entry.data);
+      if (!decoded || totalSymbolBytes + decoded.byteLength > MAX_TOTAL_SYMBOL_BYTES) {
+        return undefined;
+      }
+      extractedSymbols[assetKey] = decoded.asset;
+      totalSymbolBytes += decoded.byteLength;
+      return assetKey;
+    };
+
     const visClause = placeVisCol ? ` AND ep.${quoteIdentifier(placeVisCol)} = 1` : '';
     const orderClause = placeIdCol ? ` ORDER BY ep.${quoteIdentifier(placeIdCol)} ASC` : '';
+    const joinRef =
+      refIdCol && (refBgCol || refFgCol)
+        ? `LEFT JOIN ${quoteIdentifier(refTable!)} er ON er.${quoteIdentifier(refIdCol)} = ep.${quoteIdentifier(placeRefIdCol)}`
+        : '';
+
     const buttonQuerySql = `
       SELECT
         b.${quoteIdentifier(btnIdCol)} AS button_id,
         b.${quoteIdentifier(btnLabelCol)} AS label,
         ${btnMsgCol ? `b.${quoteIdentifier(btnMsgCol)}` : `''`} AS message,
-        ep.${quoteIdentifier(placePosCol)} AS pos
+        ${btnImgIdCol ? `b.${quoteIdentifier(btnImgIdCol)}` : `NULL`} AS image_id,
+        ${btnLibSymCol ? `b.${quoteIdentifier(btnLibSymCol)}` : `NULL`} AS lib_symbol_id,
+        ${btnBorderCol ? `b.${quoteIdentifier(btnBorderCol)}` : `NULL`} AS border_color,
+        ${btnBorderThickCol ? `b.${quoteIdentifier(btnBorderThickCol)}` : `1`} AS border_thick,
+        ${refBgCol && joinRef ? `er.${quoteIdentifier(refBgCol)}` : `NULL`} AS bg_color,
+        ${refFgCol && joinRef ? `er.${quoteIdentifier(refFgCol)}` : `NULL`} AS fg_color,
+        ep.${quoteIdentifier(placePosCol)} AS pos,
+        ${placeSpanCol ? `ep.${quoteIdentifier(placeSpanCol)}` : `'1,1'`} AS span
       FROM ${quoteIdentifier(placementTable!)} ep
       JOIN ${quoteIdentifier(buttonTable!)} b
         ON b.${quoteIdentifier(btnRefIdCol)} = ep.${quoteIdentifier(placeRefIdCol)}
+      ${joinRef}
       WHERE ep.${quoteIdentifier(placeLayoutIdCol)} = ?${visClause}${orderClause}
     `;
 
+    const boards: ObfBoard[] = [];
     for (const page of pages) {
       const pageLayouts = layoutsByPageId.get(page.id) ?? [];
       let chosenLayout: { id: number; setting: string } | null = null;
@@ -439,20 +536,39 @@ export async function parseTdSnapFile(
           const cellKey = `${pos.row},${pos.col}`;
           if (taken.has(cellKey)) continue;
 
+          const span = parseTdSnapGridSpan(cleanText(row.span));
           const buttonId = Number(row.button_id);
           const targetUid =
             cmdLinkByButtonId.get(buttonId) ?? directLinkByButtonId.get(buttonId) ?? null;
           const targetPage =
             targetUid && targetUid !== page.uid ? pageByUid.get(targetUid) : undefined;
 
+          const imageId = Number(row.image_id ?? 0);
+          const libSymId = Number(row.lib_symbol_id ?? 0);
+          const symbolImageId = resolvePageSetImage(imageId);
+          const symbolLibraryRef =
+            !symbolImageId && Number.isFinite(libSymId) && libSymId > 0
+              ? { library: 'TD Snap Library (PCS)', id: String(libSymId) }
+              : undefined;
+
           const effectiveLabel = label || message || targetPage?.title || '';
-          if (!effectiveLabel && !targetPage) continue;
+          if (!effectiveLabel && !targetPage && !symbolImageId && !symbolLibraryRef) continue;
+
+          if (symbolLibraryRef) libraryRefButtonCount += 1;
+
+          const backgroundColor = argbToHex(row.bg_color);
+          const textColor = argbToHex(row.fg_color);
+          const borderThickness = Number(row.border_thick ?? 1);
+          const borderColor =
+            borderThickness > 0 ? argbToHex(row.border_color) : undefined;
 
           taken.add(cellKey);
           buttons.push({
             id: `${page.uid}:${pos.row}:${pos.col}`,
             row: pos.row,
             column: pos.col,
+            ...(span.rowSpan > 1 ? { rowSpan: span.rowSpan } : {}),
+            ...(span.colSpan > 1 ? { colSpan: span.colSpan } : {}),
             label: effectiveLabel,
             ...(message && message !== effectiveLabel ? { vocalization: message } : {}),
             ...(targetPage
@@ -461,6 +577,11 @@ export async function parseTdSnapFile(
                   loadBoardName: targetPage.title,
                 }
               : {}),
+            ...(symbolImageId ? { symbolImageId } : {}),
+            ...(symbolLibraryRef ? { symbolLibraryRef } : {}),
+            ...(backgroundColor ? { backgroundColor } : {}),
+            ...(borderColor ? { borderColor } : {}),
+            ...(textColor ? { textColor } : {}),
           });
         }
       }
@@ -478,7 +599,9 @@ export async function parseTdSnapFile(
     if (props.homePageUniqueId && pageByUid.has(props.homePageUniqueId)) {
       rootBoardId = props.homePageUniqueId;
     } else {
-      const homeNamed = boards.find((b) => /^(home|top page|core|core words)$/i.test(b.name.trim()));
+      const homeNamed = boards.find((b) =>
+        /^(home|top page|core|core words)$/i.test(b.name.trim())
+      );
       rootBoardId = homeNamed?.id ?? boards[0]?.id ?? null;
     }
 
@@ -491,9 +614,12 @@ export async function parseTdSnapFile(
 
     const stemName = fileName.replace(/\.(sps|spb)$/i, '') || 'TD Snap Page Set';
     const vocabularyName = props.friendlyName || stemName;
-    const notes = [SYMBOLS_OMITTED_NOTE];
+    const embeddedCount = Object.keys(extractedSymbols).length;
+    const notes = [buildSymbolsSummaryNote(embeddedCount, libraryRefButtonCount)];
     if (props.schemaVersion) {
-      notes.push(`Discovered TD Snap schema version ${props.schemaVersion} at runtime (SyncHash ignored, read-only).`);
+      notes.push(
+        `Discovered TD Snap schema version ${props.schemaVersion} at runtime (SyncHash ignored, read-only).`
+      );
     }
 
     return {
@@ -503,6 +629,7 @@ export async function parseTdSnapFile(
       rootBoardId,
       mainGridSize,
       boards: orderedBoards,
+      ...(embeddedCount > 0 ? { symbols: extractedSymbols } : {}),
       notes,
     };
   } finally {

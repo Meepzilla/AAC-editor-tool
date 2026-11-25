@@ -59,4 +59,66 @@ describe('migrations', () => {
     expect(result.migratedIds).toEqual(['valid-1']);
     expect(result.skippedCount).toBe(3);
   });
+
+  it('upgrades a v1 profile to v2 while preserving snapshot symbol assets and button grid metadata', () => {
+    const rawV1 = {
+      id: 'stu-v1',
+      schemaVersion: 1,
+      displayName: 'T.H.',
+      aacSystem: 'TouchChat',
+      snapshots: [
+        {
+          id: 'snap-1',
+          importedAt: '2026-11-25T10:00:00.000Z',
+          sourceSystem: 'TouchChat',
+          sourceFileName: 'test.ce',
+          vocabularyName: 'WordPower 60',
+          gridSize: '6 x 10',
+          pageCount: 1,
+          buttonCount: 1,
+          wordList: ['apple'],
+          symbols: {
+            '{IMG-1}': {
+              id: '{IMG-1}',
+              dataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+              mimeType: 'image/png',
+              width: 1,
+              height: 1,
+            },
+          },
+          pages: [
+            {
+              id: 'p1',
+              name: 'Snacks',
+              rows: 6,
+              columns: 10,
+              buttons: [
+                {
+                  id: 'b1',
+                  row: 1,
+                  column: 2,
+                  colSpan: 2,
+                  label: 'apple',
+                  message: 'apple',
+                  symbolImageId: '{IMG-1}',
+                  backgroundColor: '#ffff6f',
+                },
+              ],
+            },
+          ],
+          notes: '',
+        },
+      ],
+    };
+
+    const { profile, migrated } = migrateProfile(rawV1);
+    expect(migrated).toBe(true);
+    expect(profile?.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
+    expect(profile?.snapshots[0].symbols?.['{IMG-1}']?.mimeType).toBe('image/png');
+    expect(profile?.snapshots[0].pages[0].buttons[0]).toMatchObject({
+      colSpan: 2,
+      symbolImageId: '{IMG-1}',
+      backgroundColor: '#FFFF6F',
+    });
+  });
 });

@@ -7,7 +7,7 @@ import type {
 } from './types';
 import { generateId } from './utils';
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export const AAC_SYSTEMS: readonly AacSystem[] = [
   'TouchChat',

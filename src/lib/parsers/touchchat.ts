@@ -1,9 +1,15 @@
 import type { Database } from 'sql.js';
-import type { AacSystem } from '../types';
+import type { AacSystem, SymbolLibraryRef, VocabSymbolAsset } from '../types';
 import { formatGridSize } from '../utils';
 import { safeUnzip } from './container-inspect';
 import {
+  colorRefToHex,
+  decodeEmbeddedSymbolAsset,
+  MAX_TOTAL_SYMBOL_BYTES,
+} from './media';
+import {
   findColumnCaseInsensitive,
+  isSqliteBytes,
   listColumns,
   listTables,
   openReadOnlySqlite,
@@ -11,9 +17,9 @@ import {
   quoteIdentifier,
 } from './sqlite-loader';
 import {
+  buildSymbolsSummaryNote,
   orderBoardsFromRoot,
   ParserRefusalError,
-  SYMBOLS_OMITTED_NOTE,
   type ObfBoard,
   type ObfBoardSet,
   type ObfButton,
@@ -22,12 +28,15 @@ import {
 /**
  * Saltillo .ce parser covering both TouchChat and LAMP Words for Life.
  *
- * Read-only. Extracts vocabulary name (from `variables` table `Name` row), pages,
- * button boxes (`layout_x` columns x `layout_y` rows), cells (both type-4 buttons and
- * type-5 button sets via modifier-0 base button), labels, spoken messages, and page links
- * (action codes 8, 9, and 73 targeting a page RID via `action_data` key 0).
- *
- * Ignores `Images.c4s` and symbol links completely — licensed symbols and photos are never extracted.
+ * Read-only. Extracts:
+ * - Vocabulary name (from `variables` table `Name` row)
+ * - Pages and button boxes (`layout_x` columns x `layout_y` rows)
+ * - Exact cell coordinates & spans (`location`, `span_x`, `span_y`)
+ * - Type-4 buttons and type-5 button sets (`modifier = 0` base button)
+ * - Button colors (`button_styles` COLORREF -> `#RRGGBB`)
+ * - Embedded symbol/photo images from `Images.c4s` (`symbol_links.feature = 145` or matching `rid`)
+ * - Built-in app symbol library references (SymbolStix, PCS, etc.) when referenced by ID
+ * - Page navigation links (action codes 8, 9, and 73 targeting a page RID via `action_data` key 0)
  */
 
 const RESOURCE_TYPE_BUTTON = 4;
@@ -36,6 +45,17 @@ const RESOURCE_TYPE_PAGE = 7;
 
 // Confirmed Saltillo navigation action codes (all store target page RID in action_data key 0).
 const NAV_ACTION_CODES = new Set([8, 9, 73]);
+
+// Known Saltillo symbol_links.feature library codes
+const FEATURE_USER_IMAGES = 145;
+const SALTILLO_LIBRARY_NAMES: Record<number, string> = {
+  14: 'SymbolStix',
+  15: 'PCS',
+  36: 'Saltillo Built-in',
+  146: 'Built-in Library',
+  147: 'Built-in Library',
+  148: 'Built-in Library',
+};
 
 interface ResourceRow {
   id: number;
@@ -50,6 +70,28 @@ interface ButtonRow {
   label: string;
   message: string;
   visible: boolean;
+  symbolLinkId: number;
+  buttonStyleId: number;
+}
+
+interface ButtonStyleRow {
+  backgroundColor?: string;
+  borderColor?: string;
+  textColor?: string;
+}
+
+interface SymbolLinkRow {
+  id: number;
+  rid: string;
+  feature: number;
+}
+
+interface RawEmbeddedImage {
+  rid: string;
+  data: Uint8Array;
+  compressed: boolean;
+  width?: number;
+  height?: number;
 }
 
 interface ButtonBoxRow {
@@ -82,9 +124,16 @@ function detectSaltilloSystem(vocabName: string, fileName: string): AacSystem {
   return 'TouchChat';
 }
 
+function findTable(tableSet: Set<string>, expectedLower: string): string | null {
+  for (const t of tableSet) {
+    if (t.toLowerCase() === expectedLower) return t;
+  }
+  return null;
+}
+
 function readVariables(db: Database, tableSet: Set<string>): Map<string, string> {
   const vars = new Map<string, string>();
-  const varTable = Array.from(tableSet).find((t) => t.toLowerCase() === 'variables');
+  const varTable = findTable(tableSet, 'variables');
   if (!varTable) return vars;
 
   const cols = listColumns(db, varTable);
@@ -101,13 +150,6 @@ function readVariables(db: Database, tableSet: Set<string>): Map<string, string>
     if (k) vars.set(k.toLowerCase(), cleanText(row.v));
   }
   return vars;
-}
-
-function findTable(tableSet: Set<string>, expectedLower: string): string | null {
-  for (const t of tableSet) {
-    if (t.toLowerCase() === expectedLower) return t;
-  }
-  return null;
 }
 
 function readResources(db: Database, table: string): Map<number, ResourceRow> {
@@ -226,6 +268,8 @@ function readButtons(db: Database, table: string): {
   const labelCol = findColumnCaseInsensitive(cols, ['label', 'text', 'title']);
   const msgCol = findColumnCaseInsensitive(cols, ['message', 'vocalization', 'speech']);
   const visCol = findColumnCaseInsensitive(cols, ['visible', 'is_visible']);
+  const symCol = findColumnCaseInsensitive(cols, ['symbol_link_id']);
+  const styleCol = findColumnCaseInsensitive(cols, ['button_style_id', 'style_id']);
   if (!idCol || !resCol || !labelCol) {
     throw new ParserRefusalError(
       'C4V_MISSING_BUTTON_COLUMNS',
@@ -240,6 +284,8 @@ function readButtons(db: Database, table: string): {
     `${quoteIdentifier(labelCol)} AS label`,
     msgCol ? `${quoteIdentifier(msgCol)} AS message` : `'' AS message`,
     visCol ? `${quoteIdentifier(visCol)} AS visible` : `1 AS visible`,
+    symCol ? `${quoteIdentifier(symCol)} AS symbol_link_id` : `0 AS symbol_link_id`,
+    styleCol ? `${quoteIdentifier(styleCol)} AS button_style_id` : `0 AS button_style_id`,
   ].join(', ');
 
   const byId = new Map<number, ButtonRow>();
@@ -254,11 +300,139 @@ function readButtons(db: Database, table: string): {
       label: cleanText(row.label),
       message: cleanText(row.message),
       visible: row.visible === null || row.visible === undefined ? true : Number(row.visible) !== 0,
+      symbolLinkId: Number(row.symbol_link_id ?? 0) || 0,
+      buttonStyleId: Number(row.button_style_id ?? 0) || 0,
     };
     byId.set(id, item);
     byResourceId.set(resourceId, item);
   }
   return { byId, byResourceId };
+}
+
+function readButtonStyles(db: Database, tableSet: Set<string>): Map<number, ButtonStyleRow> {
+  const styles = new Map<number, ButtonStyleRow>();
+  const stylesTable = findTable(tableSet, 'button_styles');
+  if (!stylesTable) return styles;
+
+  const cols = listColumns(db, stylesTable);
+  const idCol = findColumnCaseInsensitive(cols, ['id']);
+  const bodyCol = findColumnCaseInsensitive(cols, ['body_color']);
+  const borderCol = findColumnCaseInsensitive(cols, ['border_color']);
+  const fontCol = findColumnCaseInsensitive(cols, ['font_color']);
+  if (!idCol) return styles;
+
+  const selectCols = [
+    `${quoteIdentifier(idCol)} AS id`,
+    bodyCol ? `${quoteIdentifier(bodyCol)} AS body_color` : `NULL AS body_color`,
+    borderCol ? `${quoteIdentifier(borderCol)} AS border_color` : `NULL AS border_color`,
+    fontCol ? `${quoteIdentifier(fontCol)} AS font_color` : `NULL AS font_color`,
+  ].join(', ');
+
+  for (const row of queryRows(db, `SELECT ${selectCols} FROM ${quoteIdentifier(stylesTable)}`)) {
+    const id = Number(row.id);
+    if (!Number.isFinite(id)) continue;
+    const backgroundColor = colorRefToHex(row.body_color);
+    const borderColor = colorRefToHex(row.border_color);
+    const textColor = colorRefToHex(row.font_color);
+    if (backgroundColor || borderColor || textColor) {
+      styles.set(id, { backgroundColor, borderColor, textColor });
+    }
+  }
+  return styles;
+}
+
+function readSymbolLinks(db: Database, tableSet: Set<string>): Map<number, SymbolLinkRow> {
+  const map = new Map<number, SymbolLinkRow>();
+  const table = findTable(tableSet, 'symbol_links');
+  if (!table) return map;
+
+  const cols = listColumns(db, table);
+  const idCol = findColumnCaseInsensitive(cols, ['id']);
+  const ridCol = findColumnCaseInsensitive(cols, ['rid', 'symbol_rid']);
+  const featCol = findColumnCaseInsensitive(cols, ['feature', 'library_id']);
+  if (!idCol || !ridCol) return map;
+
+  const selectCols = [
+    `${quoteIdentifier(idCol)} AS id`,
+    `${quoteIdentifier(ridCol)} AS rid`,
+    featCol ? `${quoteIdentifier(featCol)} AS feature` : `0 AS feature`,
+  ].join(', ');
+
+  for (const row of queryRows(db, `SELECT ${selectCols} FROM ${quoteIdentifier(table)}`)) {
+    const id = Number(row.id);
+    const rid = normalizeRid(row.rid);
+    if (!Number.isFinite(id) || !rid) continue;
+    map.set(id, {
+      id,
+      rid,
+      feature: Number(row.feature ?? 0) || 0,
+    });
+  }
+  return map;
+}
+
+/**
+ * Reads embedded user symbol/photo blobs from `Images.c4s` inside the `.ce` archive.
+ * Fails softly (returns empty map) if `Images.c4s` is absent or non-SQLite so vocabulary
+ * text extraction still succeeds.
+ */
+async function readEmbeddedImagesC4s(
+  entries: Record<string, Uint8Array>
+): Promise<Map<string, RawEmbeddedImage>> {
+  const images = new Map<string, RawEmbeddedImage>();
+  const c4sEntries = Object.entries(entries).filter(
+    ([entryName]) => !entryName.endsWith('/') && entryName.toLowerCase().endsWith('.c4s')
+  );
+
+  for (const [, c4sBytes] of c4sEntries) {
+    if (!isSqliteBytes(c4sBytes)) continue;
+    let imgDb: Database | null = null;
+    try {
+      imgDb = await openReadOnlySqlite(c4sBytes, 'touchchat-lamp', 'Images.c4s');
+      const tables = new Set(listTables(imgDb));
+      const symTable = findTable(tables, 'symbols') ?? findTable(tables, 'images');
+      if (!symTable) continue;
+
+      const cols = listColumns(imgDb, symTable);
+      const ridCol = findColumnCaseInsensitive(cols, ['rid', 'guid', 'id']);
+      const dataCol = findColumnCaseInsensitive(cols, ['data', 'image_data', 'blob']);
+      const compCol = findColumnCaseInsensitive(cols, ['compressed']);
+      const wCol = findColumnCaseInsensitive(cols, ['width']);
+      const hCol = findColumnCaseInsensitive(cols, ['height']);
+      if (!ridCol || !dataCol) continue;
+
+      const selectCols = [
+        `${quoteIdentifier(ridCol)} AS rid`,
+        `${quoteIdentifier(dataCol)} AS data`,
+        compCol ? `${quoteIdentifier(compCol)} AS compressed` : `0 AS compressed`,
+        wCol ? `${quoteIdentifier(wCol)} AS width` : `NULL AS width`,
+        hCol ? `${quoteIdentifier(hCol)} AS height` : `NULL AS height`,
+      ].join(', ');
+
+      for (const row of queryRows(imgDb, `SELECT ${selectCols} FROM ${quoteIdentifier(symTable)}`)) {
+        const rid = normalizeRid(row.rid);
+        if (!rid || !(row.data instanceof Uint8Array) || row.data.length === 0) continue;
+        images.set(rid, {
+          rid,
+          data: row.data,
+          compressed: Number(row.compressed ?? 0) !== 0,
+          width: typeof row.width === 'number' ? row.width : undefined,
+          height: typeof row.height === 'number' ? row.height : undefined,
+        });
+      }
+    } catch {
+      // Skip unreadable optional Images.c4s database cleanly
+    } finally {
+      if (imgDb) {
+        try {
+          imgDb.close();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+  return images;
 }
 
 /**
@@ -308,7 +482,11 @@ function readButtonSetBaseButtons(
     const btn = buttonsById.get(btnId);
     if (!btn) continue;
     const prev = bestModifier.get(setId);
-    if (!prev || (modifier === 0 && prev.modifier !== 0) || (prev.modifier !== 0 && modifier < prev.modifier)) {
+    if (
+      !prev ||
+      (modifier === 0 && prev.modifier !== 0) ||
+      (prev.modifier !== 0 && modifier < prev.modifier)
+    ) {
       bestModifier.set(setId, { modifier, button: btn });
     }
   }
@@ -376,7 +554,9 @@ function readNavigationTargets(db: Database, tableSet: Set<string>): Map<number,
 }
 
 /**
- * Parses a TouchChat or LAMP Words for Life `.ce` file into the common OBF board model.
+ * Parses a TouchChat or LAMP Words for Life `.ce` file into the common OBF board model,
+ * extracting grid coordinates, spans, colors, embedded `Images.c4s` symbols, built-in
+ * library symbol references, labels, messages, and page links.
  */
 export async function parseTouchChatCe(
   fileName: string,
@@ -384,7 +564,6 @@ export async function parseTouchChatCe(
 ): Promise<ObfBoardSet> {
   const entries = safeUnzip(bytes, 'touchchat-lamp');
 
-  // Locate the .c4v vocabulary SQLite database (ignoring Images.c4s, Manifest.c4i, version.txt).
   const c4vEntries = Object.entries(entries).filter(
     ([entryName]) => !entryName.endsWith('/') && entryName.toLowerCase().endsWith('.c4v')
   );
@@ -399,6 +578,7 @@ export async function parseTouchChatCe(
 
   const [c4vName, c4vBytes] = c4vEntries[0];
   const db = await openReadOnlySqlite(c4vBytes, 'touchchat-lamp', 'the .c4v vocabulary database');
+  const embeddedImages = await readEmbeddedImagesC4s(entries);
 
   try {
     const tableList = listTables(db);
@@ -431,7 +611,8 @@ export async function parseTouchChatCe(
     }
 
     const variables = readVariables(db, tableSet);
-    const stemFallback = c4vName.split('/').pop()?.replace(/\.c4v$/i, '') || fileName.replace(/\.ce$/i, '');
+    const stemFallback =
+      c4vName.split('/').pop()?.replace(/\.c4v$/i, '') || fileName.replace(/\.ce$/i, '');
     const vocabularyName = variables.get('name') || stemFallback || 'Unnamed Vocabulary';
     const sourceSystem = detectSaltilloSystem(vocabularyName, fileName);
 
@@ -452,6 +633,8 @@ export async function parseTouchChatCe(
 
     const boxes = readButtonBoxes(db, boxesTable!);
     const { byId: buttonsById, byResourceId: buttonsByResId } = readButtons(db, buttonsTable!);
+    const buttonStyles = readButtonStyles(db, tableSet);
+    const symbolLinks = readSymbolLinks(db, tableSet);
     const buttonSetsByResId = readButtonSetBaseButtons(db, tableSet, buttonsById);
     const navByResId = readNavigationTargets(db, tableSet);
 
@@ -480,11 +663,13 @@ export async function parseTouchChatCe(
       boxesByPageId.set(pageId, list);
     }
 
-    // Read all cells grouped by button_box_id.
+    // Read all cells grouped by button_box_id, including span_x / span_y.
     const cellCols = listColumns(db, cellsTable!);
     const cellBoxCol = findColumnCaseInsensitive(cellCols, ['button_box_id', 'box_id']);
     const cellResCol = findColumnCaseInsensitive(cellCols, ['resource_id']);
     const cellLocCol = findColumnCaseInsensitive(cellCols, ['location', 'position', 'cell_index']);
+    const cellSpanXCol = findColumnCaseInsensitive(cellCols, ['span_x', 'col_span']);
+    const cellSpanYCol = findColumnCaseInsensitive(cellCols, ['span_y', 'row_span']);
     if (!cellBoxCol || !cellResCol || !cellLocCol) {
       throw new ParserRefusalError(
         'C4V_MISSING_CELL_COLUMNS',
@@ -493,10 +678,21 @@ export async function parseTouchChatCe(
       );
     }
 
-    const cellsByBoxId = new Map<number, Array<{ resourceId: number; location: number }>>();
+    const cellSelect = [
+      `${quoteIdentifier(cellBoxCol)} AS box_id`,
+      `${quoteIdentifier(cellResCol)} AS resource_id`,
+      `${quoteIdentifier(cellLocCol)} AS location`,
+      cellSpanXCol ? `${quoteIdentifier(cellSpanXCol)} AS span_x` : `1 AS span_x`,
+      cellSpanYCol ? `${quoteIdentifier(cellSpanYCol)} AS span_y` : `1 AS span_y`,
+    ].join(', ');
+
+    const cellsByBoxId = new Map<
+      number,
+      Array<{ resourceId: number; location: number; spanX: number; spanY: number }>
+    >();
     for (const row of queryRows(
       db,
-      `SELECT ${quoteIdentifier(cellBoxCol)} AS box_id, ${quoteIdentifier(cellResCol)} AS resource_id, ${quoteIdentifier(cellLocCol)} AS location FROM ${quoteIdentifier(cellsTable!)} ORDER BY ${quoteIdentifier(cellLocCol)} ASC`
+      `SELECT ${cellSelect} FROM ${quoteIdentifier(cellsTable!)} ORDER BY ${quoteIdentifier(cellLocCol)} ASC`
     )) {
       const boxId = Number(row.box_id);
       const resourceId = Number(row.resource_id);
@@ -505,15 +701,67 @@ export async function parseTouchChatCe(
         continue;
       }
       const list = cellsByBoxId.get(boxId) ?? [];
-      list.push({ resourceId, location });
+      list.push({
+        resourceId,
+        location,
+        spanX: Math.max(1, Math.round(Number(row.span_x ?? 1) || 1)),
+        spanY: Math.max(1, Math.round(Number(row.span_y ?? 1) || 1)),
+      });
       cellsByBoxId.set(boxId, list);
     }
+
+    // Deduplicated symbol assets decoded lazily only when referenced by a placed button.
+    const extractedSymbols: Record<string, VocabSymbolAsset> = {};
+    let totalSymbolBytes = 0;
+    let libraryRefButtonCount = 0;
+
+    const resolveButtonSymbol = (
+      symbolLinkId: number
+    ): { symbolImageId?: string; symbolLibraryRef?: SymbolLibraryRef } => {
+      if (!symbolLinkId) return {};
+      const link = symbolLinks.get(symbolLinkId);
+      if (!link) return {};
+
+      const rawImg = embeddedImages.get(link.rid);
+      if (rawImg) {
+        if (extractedSymbols[link.rid]) {
+          return { symbolImageId: link.rid };
+        }
+        if (totalSymbolBytes < MAX_TOTAL_SYMBOL_BYTES) {
+          const decoded = decodeEmbeddedSymbolAsset(link.rid, rawImg.data, {
+            compressed: rawImg.compressed,
+            width: rawImg.width,
+            height: rawImg.height,
+          });
+          if (decoded && totalSymbolBytes + decoded.byteLength <= MAX_TOTAL_SYMBOL_BYTES) {
+            extractedSymbols[link.rid] = decoded.asset;
+            totalSymbolBytes += decoded.byteLength;
+            return { symbolImageId: link.rid };
+          }
+        }
+      }
+
+      if (link.feature !== FEATURE_USER_IMAGES || !rawImg) {
+        const library =
+          SALTILLO_LIBRARY_NAMES[link.feature] ??
+          (link.feature === FEATURE_USER_IMAGES
+            ? 'Custom Image (Missing)'
+            : `Symbol Library #${link.feature}`);
+        return {
+          symbolLibraryRef: {
+            library,
+            id: link.rid,
+          },
+        };
+      }
+
+      return {};
+    };
 
     // Assemble OBF boards for every page.
     const boards: ObfBoard[] = [];
     for (const page of pages) {
       const pageBoxIds = boxesByPageId.get(page.id) ?? [];
-      // Pick the primary (largest capacity) button box on the page.
       let primaryBox: ButtonBoxRow | null = null;
       for (const boxId of pageBoxIds) {
         const candidate = boxes.get(boxId);
@@ -547,13 +795,15 @@ export async function parseTouchChatCe(
 
           if (!btnRow || !btnRow.visible) continue;
 
-          // Navigation may live on the button's own resource_id or the button set's resource_id.
           const targetRid =
             navByResId.get(btnRow.resourceId) ?? navByResId.get(cell.resourceId);
           const targetPage = targetRid ? pageByRid.get(targetRid) : undefined;
+          const symbolInfo = resolveButtonSymbol(btnRow.symbolLinkId);
 
           const label = btnRow.label || btnRow.message;
-          if (!label && !targetPage) continue;
+          if (!label && !targetPage && !symbolInfo.symbolImageId && !symbolInfo.symbolLibraryRef) {
+            continue;
+          }
 
           const rowIndex = Math.floor(cell.location / columns);
           const colIndex = cell.location % columns;
@@ -561,11 +811,16 @@ export async function parseTouchChatCe(
           if (occupied.has(posKey)) continue;
           occupied.add(posKey);
 
+          if (symbolInfo.symbolLibraryRef) libraryRefButtonCount += 1;
+          const style = btnRow.buttonStyleId ? buttonStyles.get(btnRow.buttonStyleId) : undefined;
           const message = btnRow.message || btnRow.label;
+
           buttons.push({
             id: `${page.rid}:${rowIndex}:${colIndex}`,
             row: rowIndex,
             column: colIndex,
+            ...(cell.spanY > 1 ? { rowSpan: cell.spanY } : {}),
+            ...(cell.spanX > 1 ? { colSpan: cell.spanX } : {}),
             label: label || targetPage?.name || '',
             ...(message && message !== label ? { vocalization: message } : {}),
             ...(targetPage
@@ -574,6 +829,13 @@ export async function parseTouchChatCe(
                   loadBoardName: targetPage.name,
                 }
               : {}),
+            ...(symbolInfo.symbolImageId ? { symbolImageId: symbolInfo.symbolImageId } : {}),
+            ...(symbolInfo.symbolLibraryRef
+              ? { symbolLibraryRef: symbolInfo.symbolLibraryRef }
+              : {}),
+            ...(style?.backgroundColor ? { backgroundColor: style.backgroundColor } : {}),
+            ...(style?.borderColor ? { borderColor: style.borderColor } : {}),
+            ...(style?.textColor ? { textColor: style.textColor } : {}),
           });
         }
       }
@@ -587,7 +849,6 @@ export async function parseTouchChatCe(
       });
     }
 
-    // Determine home/root page: variables HomePage/StartPage RID, or page named "HOME"/"Home", else first page.
     const homeRidCandidate = normalizeRid(
       variables.get('homepage') ||
         variables.get('home_page') ||
@@ -606,6 +867,7 @@ export async function parseTouchChatCe(
     const orderedBoards = orderBoardsFromRoot(boards, rootBoardId);
     const mainBoard = orderedBoards[0];
     const mainGridSize = mainBoard ? formatGridSize(mainBoard.rows, mainBoard.columns) : '';
+    const embeddedCount = Object.keys(extractedSymbols).length;
 
     return {
       format: 'open-board-0.1',
@@ -614,7 +876,8 @@ export async function parseTouchChatCe(
       rootBoardId,
       mainGridSize,
       boards: orderedBoards,
-      notes: [SYMBOLS_OMITTED_NOTE],
+      ...(embeddedCount > 0 ? { symbols: extractedSymbols } : {}),
+      notes: [buildSymbolsSummaryNote(embeddedCount, libraryRefButtonCount)],
     };
   } finally {
     db.close();

@@ -126,7 +126,7 @@ describe('data-store (IndexedDB persistence)', () => {
 
     const loaded = await getProfile('legacy-1');
     expect(loaded).not.toBeNull();
-    expect(loaded?.schemaVersion).toBe(1);
+    expect(loaded?.schemaVersion).toBe(2);
     expect(loaded?.displayName).toBe('E.T.');
     expect(loaded?.showFullName).toBe(false);
     expect(loaded?.photoEnabled).toBe(false);

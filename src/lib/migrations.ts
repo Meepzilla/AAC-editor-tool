@@ -51,10 +51,27 @@ const MIGRATION_STEPS: Record<number, MigrationStep> = {
     next.schemaVersion = 1;
     return next;
   },
+  // v1 -> v2: snapshot symbol asset dictionary & button spans/colors/symbol refs
+  1: (record) => ({
+    ...record,
+    schemaVersion: 2,
+  }),
 };
 
 function asString(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback;
+}
+
+function asHexColor(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return /^#[0-9a-fA-F]{6}$/.test(trimmed) ? trimmed.toUpperCase() : undefined;
+}
+
+function asPositiveSpan(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  const rounded = Math.round(value);
+  return rounded > 1 ? rounded : undefined;
 }
 
 function asAacSystem(value: unknown): AacSystem {
@@ -119,14 +136,41 @@ function normalizeButton(raw: unknown): VocabButton | null {
   const message = asString(obj.message).trim();
   const linkTargetPageName = asString(obj.linkTargetPageName).trim() || undefined;
   const linkTargetPageId = asString(obj.linkTargetPageId).trim() || undefined;
+  const rowSpan = asPositiveSpan(obj.rowSpan);
+  const colSpan = asPositiveSpan(obj.colSpan);
+  const symbolImageId = asString(obj.symbolImageId).trim() || undefined;
+  const rawLib = obj.symbolLibraryRef;
+  const symbolLibraryRef =
+    rawLib &&
+    typeof rawLib === 'object' &&
+    typeof (rawLib as RecordObject).library === 'string' &&
+    typeof (rawLib as RecordObject).id === 'string'
+      ? {
+          library: asString((rawLib as RecordObject).library).trim(),
+          id: asString((rawLib as RecordObject).id).trim(),
+        }
+      : undefined;
+  const backgroundColor = asHexColor(obj.backgroundColor);
+  const borderColor = asHexColor(obj.borderColor);
+  const textColor = asHexColor(obj.textColor);
+
   return {
     id: asString(obj.id) || generateId(),
     row: typeof obj.row === 'number' && Number.isFinite(obj.row) ? obj.row : 0,
     column: typeof obj.column === 'number' && Number.isFinite(obj.column) ? obj.column : 0,
+    ...(rowSpan ? { rowSpan } : {}),
+    ...(colSpan ? { colSpan } : {}),
     label,
     message,
     ...(linkTargetPageName ? { linkTargetPageName } : {}),
     ...(linkTargetPageId ? { linkTargetPageId } : {}),
+    ...(symbolImageId ? { symbolImageId } : {}),
+    ...(symbolLibraryRef && symbolLibraryRef.library && symbolLibraryRef.id
+      ? { symbolLibraryRef }
+      : {}),
+    ...(backgroundColor ? { backgroundColor } : {}),
+    ...(borderColor ? { borderColor } : {}),
+    ...(textColor ? { textColor } : {}),
   };
 }
 
@@ -146,6 +190,37 @@ function normalizePage(raw: unknown): VocabPage | null {
     columns: typeof obj.columns === 'number' && obj.columns > 0 ? Math.round(obj.columns) : 1,
     buttons,
   };
+}
+
+function normalizeSymbolAssets(
+  raw: unknown
+): Record<string, { id: string; dataUrl: string; mimeType: string; width?: number; height?: number }> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: Record<
+    string,
+    { id: string; dataUrl: string; mimeType: string; width?: number; height?: number }
+  > = {};
+  let count = 0;
+  for (const [key, val] of Object.entries(raw as RecordObject)) {
+    if (!val || typeof val !== 'object') continue;
+    const item = val as RecordObject;
+    const dataUrl = asString(item.dataUrl);
+    if (!dataUrl.startsWith('data:image/')) continue;
+    const mimeType = asString(item.mimeType) || 'image/png';
+    const width =
+      typeof item.width === 'number' && item.width > 0 ? Math.round(item.width) : undefined;
+    const height =
+      typeof item.height === 'number' && item.height > 0 ? Math.round(item.height) : undefined;
+    out[key] = {
+      id: asString(item.id) || key,
+      dataUrl,
+      mimeType,
+      ...(width ? { width } : {}),
+      ...(height ? { height } : {}),
+    };
+    count += 1;
+  }
+  return count > 0 ? out : undefined;
 }
 
 function normalizeSnapshots(value: unknown): VocabSnapshot[] {
@@ -177,6 +252,7 @@ function normalizeSnapshots(value: unknown): VocabSnapshot[] {
         : pages.length;
     const fallbackGrid =
       pages.length > 0 ? formatGridSize(pages[0].rows, pages[0].columns) : '';
+    const symbols = normalizeSymbolAssets(obj.symbols);
     snapshots.push({
       id: asString(obj.id) || generateId(),
       importedAt: asString(obj.importedAt) || new Date().toISOString(),
@@ -188,6 +264,7 @@ function normalizeSnapshots(value: unknown): VocabSnapshot[] {
       buttonCount,
       wordList,
       pages,
+      ...(symbols ? { symbols } : {}),
       notes: asString(obj.notes),
     });
   }
